@@ -72,6 +72,8 @@
  * errors, and the implementation is crafted for clarity rather than speed.
  */
 
+static counter_t g_icache_miss;
+
 /* simulated registers */
 static struct regs_t regs;
 
@@ -126,6 +128,14 @@ sim_reg_stats(struct stat_sdb_t *sdb)
   stat_reg_formula(sdb, "sim_inst_rate",
 		   "simulation speed (in insts/sec)",
 		   "sim_num_insn / sim_elapsed_time", NULL);
+
+  stat_reg_counter(sdb, "sim_num_icache_miss",
+                "total number of instruction cache misses",
+                &g_icache_miss, 0, NULL);
+  stat_reg_formula(sdb, "sim_icache_miss_rate",
+                "instruction cache miss rate (percentage)",
+                "100*(sim_num_icache_miss / sim_num_insn)", NULL);
+
   ld_reg_stats(sdb);
   mem_reg_stats(mem, sdb);
 }
@@ -273,6 +283,33 @@ sim_uninit(void)
 #define DFCC            (2+32+32)
 #define DTMP            (3+32+32)
 
+struct block {
+  int           m_valid; // is block valid?
+  md_addr_t     m_tag;   // tag used to determine whether we have a cache hit
+};
+
+struct cache {
+  struct block *m_tag_array;
+  unsigned m_total_blocks;
+  unsigned m_set_shift;
+  unsigned m_set_mask;
+  unsigned m_tag_shift;
+};
+
+void cache_access( struct cache *c, unsigned addr, counter_t *miss_counter ) {
+    unsigned  index, tag;
+    index = (addr>>c->m_set_shift)&c->m_set_mask;
+    tag = (addr>>c->m_tag_shift);
+    assert( index < c->m_total_blocks );
+    if(!(c->m_tag_array[index].m_valid&&(c->m_tag_array[index].m_tag==tag))) {
+    	*miss_counter = *miss_counter + 1;
+    	c->m_tag_array[index].m_valid = 1;
+    	c->m_tag_array[index].m_tag = tag;
+	} 
+}
+
+
+
 /* start simulation, program loaded, processor precise state initialized */
 void
 sim_main(void)
@@ -282,6 +319,13 @@ sim_main(void)
   enum md_opcode op;
   register int is_write;
   enum md_fault_type fault;
+
+	struct cache *icache = (struct cache *) calloc( sizeof(struct cache), 1 );
+	icache->m_tag_array = (struct block *) calloc( sizeof(struct block), 512 );
+	icache->m_total_blocks = 512;
+	icache->m_set_shift = 6;
+	icache->m_set_mask = (1<<9)-1;
+	icache->m_tag_shift = 15;
 
   fprintf(stderr, "sim: ** starting functional simulation **\n");
 
@@ -296,6 +340,10 @@ sim_main(void)
 #ifdef TARGET_ALPHA
       regs.regs_F.d[MD_REG_ZERO] = 0.0;
 #endif /* TARGET_ALPHA */
+
+
+      cache_access(icache, regs.regs_PC, &g_icache_miss);
+
 
       /* get the next instruction to execute */
       MD_FETCH_INST(inst, mem, regs.regs_PC);
