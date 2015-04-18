@@ -75,6 +75,14 @@
 static counter_t g_icache_miss;
 static counter_t g_timestamp;
 
+static counter_t sim_num_loads;
+static counter_t sim_num_stores;
+
+static counter_t sim_num_load_misses;
+static counter_t sim_num_store_misses;
+
+static counter_t sim_num_writebacks;
+
 /* simulated registers */
 static struct regs_t regs;
 
@@ -137,6 +145,39 @@ sim_reg_stats(struct stat_sdb_t *sdb)
                 "instruction cache miss rate (percentage)",
                 "100*(sim_num_icache_miss / sim_num_insn)", NULL);
 
+  stat_reg_counter(sdb, "sim_num_loads",
+		   "total number of loads executed",
+		   &sim_num_loads, 0, NULL);
+
+  stat_reg_counter(sdb, "sim_num_stores",
+		   "total number of stores executed",
+		   &sim_num_stores, 0, NULL);
+
+   stat_reg_counter(sdb, "sim_num_load_misses",
+		   "total number of load misses",
+		   &sim_num_load_misses, 0, NULL);
+
+  stat_reg_counter(sdb, "sim_num_store_misses",
+		   "total number of store misses",
+		   &sim_num_store_misses, 0, NULL);
+
+  stat_reg_counter(sdb, "sim_num_writebacks",
+		   "total number of writeback events",
+		   &sim_num_store_writebacks, 0, NULL);  
+
+  stat_reg_formula(sdb, "sim_load_miss_rate",
+		   "simulation load miss rate",
+		   "sim_num_loads / sim_num_load_misses", NULL);
+
+  stat_reg_formula(sdb, "sim_store_miss_rate",
+		   "simulation store miss rate",
+		   "sim_num_stores / sim_num_store_misses", NULL);
+
+  stat_reg_formula(sdb, "sim_store_writeback_rate",
+		   "simulation writeback rate",
+		   "sim_num_writebacks / sim_num_stores", NULL);
+
+
   ld_reg_stats(sdb);
   mem_reg_stats(mem, sdb);
 }
@@ -146,6 +187,12 @@ void
 sim_init(void)
 {
   sim_num_refs = 0;
+  g_timestamp = 0;
+  sim_num_loads = 0;
+  sim_num_stores = 0;
+  sim_num_load_misses = 0;
+  sim_num_store_misses = 0;
+  sim_num_writebacks = 0;
 
   /* allocate and initialize register file */
   regs_init(&regs);
@@ -286,6 +333,7 @@ sim_uninit(void)
 
 struct block {
   int           m_valid; // is block valid?
+  int			m_dirty;
   md_addr_t     m_tag;   // tag used to determine whether we have a cache hit
   counter_t m_timestamp;
 };
@@ -299,7 +347,7 @@ struct cache {
   unsigned m_nways;
 };
 
-void cache_access( struct cache *c, unsigned addr, counter_t *miss_counter ) {
+void cache_access( struct cache *c, unsigned addr, counter_t *miss_counter, register int is_read, register int is_write) {
     unsigned  index, tag;
     unsigned  set_index;
 
@@ -315,10 +363,10 @@ void cache_access( struct cache *c, unsigned addr, counter_t *miss_counter ) {
     block_miss = 0;		// reset block miss counter
     block_evict = 0;	// reset block evict bit
     nways_shift = log(c->m_nways)/log(2);		// calculate shift amount for associative sets
-    index = (addr>>c->m_set_shift)&c->m_set_mask;	// shift over to include associative sets
+    index = (addr>>c->m_set_shift)&c->m_set_mask;
     // printf("\n\n**** Cash Access ****");
     // printf("\nindex=%d", index);
-    set_index = index<<nways_shift;
+    set_index = index<<nways_shift;	// shift over to include associative sets
     // printf("\nset_index=%d", set_index);
 
     tag = (addr>>c->m_tag_shift);
@@ -335,6 +383,9 @@ void cache_access( struct cache *c, unsigned addr, counter_t *miss_counter ) {
     		block_miss++;				// if not, increase block_miss counter
     	}else{
     		c->m_tag_array[set_index+i].m_timestamp = g_timestamp;	// if yes, cache hit and update blocks timestamp
+    		if(is_write){
+    			c->m_tag_array[set_index+i].m_dirty = 1;	// writeback, set dirty bit
+    		}
     		// printf("\n*Cash Hit*");
     	}
     }
@@ -350,6 +401,9 @@ void cache_access( struct cache *c, unsigned addr, counter_t *miss_counter ) {
     			c->m_tag_array[set_index+j].m_valid = 1;
     			c->m_tag_array[set_index+j].m_tag = tag;
     			c->m_tag_array[set_index+j].m_timestamp = g_timestamp;
+    			if(is_write){
+    				c->m_tag_array[set_index+j].m_dirty = 1;	// writeback, set dirty bit
+    			}
     			block_evict = 1;	// no block needs evicting
     			// printf("\nset_index+j=%d", set_index+j);
     			break;
@@ -365,9 +419,17 @@ void cache_access( struct cache *c, unsigned addr, counter_t *miss_counter ) {
     			}
     		}
     		// printf("\nblock_LRU=%d", block_LRU);
+    		if(is_read&&is_write){		// if reading or loading to cache and evicting a block
+    			if(c->m_tag_array[block_LRU].m_dirty){	// if block is dirty(needs to be written back to memory)
+    				sim_num_writebacks++;	// writeback event
+    			}
+    		}
     		c->m_tag_array[block_LRU].m_valid = 1;	// evict and fill least recently used block and update timestamp
     		c->m_tag_array[block_LRU].m_tag = tag;
     		c->m_tag_array[block_LRU].m_timestamp = g_timestamp;
+    		if(is_write){
+    			c->m_tag_array[block_LRU].m_dirty = 1;	// writeback, set dirty bit
+    		}
     	}
     } 
 }
@@ -381,6 +443,7 @@ sim_main(void)
   md_inst_t inst;
   register md_addr_t addr;
   enum md_opcode op;
+  register int is_read;
   register int is_write;
   enum md_fault_type fault;
 
@@ -391,8 +454,6 @@ sim_main(void)
 	icache->m_set_mask = (1<<8)-1;
 	icache->m_tag_shift = 13;
 	icache->m_nways = 4;
-
-	g_timestamp = 0;
 
   fprintf(stderr, "sim: ** starting functional simulation **\n");
 
@@ -409,7 +470,7 @@ sim_main(void)
 #endif /* TARGET_ALPHA */
 
 
-      cache_access(icache, regs.regs_PC, &g_icache_miss);
+
 
 
       /* get the next instruction to execute */
@@ -459,13 +520,23 @@ sim_main(void)
 	  /* fflush(stderr); */
 	}
 
+	
+
+
       if (MD_OP_FLAGS(op) & F_MEM)
 	{
 	  sim_num_refs++;
-	  if (MD_OP_FLAGS(op) & F_STORE)
-	    is_write = TRUE;
+	  if(((MD_OP_FLAGS(op)&F_LOAD)!=0)){	// check if load instruction
+	  		sim_num_loads++;
+	  		is_read = TRUE;
+	  }
+	  if(((MD_OP_FLAGS(op)&F_STORE)!=0)){	// check if store instruction
+	  		sim_num_stores++;
+	  		is_write = TRUE;
+	  }
 	}
 
+	cache_access(icache, regs.regs_PC, &g_icache_miss, is_read, is_write);
 
       /* go to the next instruction */
       regs.regs_PC = regs.regs_NPC;
