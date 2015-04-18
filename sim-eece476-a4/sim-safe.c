@@ -73,6 +73,7 @@
  */
 
 static counter_t g_icache_miss;
+static counter_t g_timestamp;
 
 /* simulated registers */
 static struct regs_t regs;
@@ -286,6 +287,7 @@ sim_uninit(void)
 struct block {
   int           m_valid; // is block valid?
   md_addr_t     m_tag;   // tag used to determine whether we have a cache hit
+  counter_t m_timestamp;
 };
 
 struct cache {
@@ -294,18 +296,80 @@ struct cache {
   unsigned m_set_shift;
   unsigned m_set_mask;
   unsigned m_tag_shift;
+  unsigned m_nways;
 };
 
 void cache_access( struct cache *c, unsigned addr, counter_t *miss_counter ) {
     unsigned  index, tag;
-    index = (addr>>c->m_set_shift)&c->m_set_mask;
+    unsigned  set_index;
+
+    int i;
+    int j;
+    int k;
+    int nways_shift;
+    int block_miss;
+    int block_evict;
+    int block_timestamp;
+    int block_LRU;
+
+    block_miss = 0;		// reset block miss counter
+    block_evict = 0;	// reset block evict bit
+    nways_shift = log(c->m_nways)/log(2);		// calculate shift amount for associative sets
+    index = (addr>>c->m_set_shift)&c->m_set_mask;	// shift over to include associative sets
+    // printf("\n\n**** Cash Access ****");
+    // printf("\nindex=%d", index);
+    set_index = index<<nways_shift;
+    // printf("\nset_index=%d", set_index);
+
     tag = (addr>>c->m_tag_shift);
-    assert( index < c->m_total_blocks );
-    if(!(c->m_tag_array[index].m_valid&&(c->m_tag_array[index].m_tag==tag))) {
+
+    g_timestamp++;		// increase timestamp
+
+    // printf("\ng_timestamp=%d", g_timestamp);
+
+    assert( set_index < c->m_total_blocks );
+
+    for(i=0 ; i<c->m_nways ; i++){		// iterate through each block in a set 
+    	// printf("\nset_index+i=%d", set_index+i);
+    	if(!(c->m_tag_array[set_index+i].m_valid&&(c->m_tag_array[set_index+i].m_tag==tag))){	// check if block is valid and has the same tag
+    		block_miss++;				// if not, increase block_miss counter
+    	}else{
+    		c->m_tag_array[set_index+i].m_timestamp = g_timestamp;	// if yes, cache hit and update blocks timestamp
+    		// printf("\n*Cash Hit*");
+    	}
+    }
+
+    // printf("\nblock_miss=%d", block_miss);
+
+
+    if(block_miss == c->m_nways){		// check if block misses is equal to number of blocks in a set, indicating a cache miss
     	*miss_counter = *miss_counter + 1;
-    	c->m_tag_array[index].m_valid = 1;
-    	c->m_tag_array[index].m_tag = tag;
-	} 
+    	// printf("\n*Cash Miss*");
+    	for(j=0 ; j<c->m_nways ; j++){	// iterate through each block in a set 
+    		if(!(c->m_tag_array[set_index+j].m_valid)){		// check if block is invalid, and then fill block and update timestamp
+    			c->m_tag_array[set_index+j].m_valid = 1;
+    			c->m_tag_array[set_index+j].m_tag = tag;
+    			c->m_tag_array[set_index+j].m_timestamp = g_timestamp;
+    			block_evict = 1;	// no block needs evicting
+    			// printf("\nset_index+j=%d", set_index+j);
+    			break;
+    		}
+    	}
+    	if(!(block_evict == 1)){	// if no invalid blocks and therefore a block needs evicting
+			block_timestamp = c->m_tag_array[set_index].m_timestamp;	// record timestamp of first block in set
+    		block_LRU = set_index;	// record index of first block in set
+    		for(k=0 ; k<c->m_nways ; k++){	// iterate through each block in a set
+    			if(c->m_tag_array[set_index+k].m_timestamp < block_timestamp){	// compare timestamp values and determine least recently used block
+    				block_timestamp = c->m_tag_array[set_index+k].m_timestamp;
+    				block_LRU = set_index+k;
+    			}
+    		}
+    		// printf("\nblock_LRU=%d", block_LRU);
+    		c->m_tag_array[block_LRU].m_valid = 1;	// evict and fill least recently used block and update timestamp
+    		c->m_tag_array[block_LRU].m_tag = tag;
+    		c->m_tag_array[block_LRU].m_timestamp = g_timestamp;
+    	}
+    } 
 }
 
 
@@ -321,11 +385,14 @@ sim_main(void)
   enum md_fault_type fault;
 
 	struct cache *icache = (struct cache *) calloc( sizeof(struct cache), 1 );
-	icache->m_tag_array = (struct block *) calloc( sizeof(struct block), 512 );
-	icache->m_total_blocks = 512;
-	icache->m_set_shift = 6;
-	icache->m_set_mask = (1<<9)-1;
-	icache->m_tag_shift = 15;
+	icache->m_tag_array = (struct block *) calloc( sizeof(struct block), 1024 );
+	icache->m_total_blocks = 1024;
+	icache->m_set_shift = 5;
+	icache->m_set_mask = (1<<8)-1;
+	icache->m_tag_shift = 13;
+	icache->m_nways = 4;
+
+	g_timestamp = 0;
 
   fprintf(stderr, "sim: ** starting functional simulation **\n");
 
