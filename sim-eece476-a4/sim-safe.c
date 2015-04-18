@@ -163,19 +163,19 @@ sim_reg_stats(struct stat_sdb_t *sdb)
 
   stat_reg_counter(sdb, "sim_num_writebacks",
 		   "total number of writeback events",
-		   &sim_num_store_writebacks, 0, NULL);  
+		   &sim_num_writebacks, 0, NULL);  
 
   stat_reg_formula(sdb, "sim_load_miss_rate",
 		   "simulation load miss rate",
-		   "sim_num_loads / sim_num_load_misses", NULL);
+		   "100*(sim_num_load_misses / sim_num_loads)", NULL);
 
   stat_reg_formula(sdb, "sim_store_miss_rate",
 		   "simulation store miss rate",
-		   "sim_num_stores / sim_num_store_misses", NULL);
+		   "100*(sim_num_store_misses / sim_num_stores)", NULL);
 
   stat_reg_formula(sdb, "sim_store_writeback_rate",
 		   "simulation writeback rate",
-		   "sim_num_writebacks / sim_num_stores", NULL);
+		   "100*(sim_num_writebacks / sim_num_stores)", NULL);
 
 
   ld_reg_stats(sdb);
@@ -403,6 +403,10 @@ void cache_access( struct cache *c, unsigned addr, counter_t *miss_counter, regi
     			c->m_tag_array[set_index+j].m_timestamp = g_timestamp;
     			if(is_write){
     				c->m_tag_array[set_index+j].m_dirty = 1;	// writeback, set dirty bit
+    				sim_num_store_misses++;		//record store miss
+    			}
+    			if(is_read){
+    				sim_num_load_misses++;		//record load miss
     			}
     			block_evict = 1;	// no block needs evicting
     			// printf("\nset_index+j=%d", set_index+j);
@@ -429,6 +433,10 @@ void cache_access( struct cache *c, unsigned addr, counter_t *miss_counter, regi
     		c->m_tag_array[block_LRU].m_timestamp = g_timestamp;
     		if(is_write){
     			c->m_tag_array[block_LRU].m_dirty = 1;	// writeback, set dirty bit
+    			sim_num_store_misses++;		//record store miss
+    		}
+    		if(is_read){
+    			sim_num_load_misses++;		//record load miss
     		}
     	}
     } 
@@ -448,12 +456,12 @@ sim_main(void)
   enum md_fault_type fault;
 
 	struct cache *icache = (struct cache *) calloc( sizeof(struct cache), 1 );
-	icache->m_tag_array = (struct block *) calloc( sizeof(struct block), 1024 );
-	icache->m_total_blocks = 1024;
-	icache->m_set_shift = 5;
-	icache->m_set_mask = (1<<8)-1;
-	icache->m_tag_shift = 13;
-	icache->m_nways = 4;
+	icache->m_tag_array = (struct block *) calloc( sizeof(struct block), 256 );
+	icache->m_total_blocks = 256;
+	icache->m_set_shift = 6;
+	icache->m_set_mask = (1<<5)-1;
+	icache->m_tag_shift = 11;
+	icache->m_nways = 8;
 
   fprintf(stderr, "sim: ** starting functional simulation **\n");
 
